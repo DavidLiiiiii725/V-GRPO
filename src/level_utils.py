@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 
-_LEVEL_INT_PATTERN = re.compile(r"-?\d+")
+_LEVEL_INT_PATTERN = re.compile(r"\d+")
 
 
 def parse_level(value: object) -> int:
