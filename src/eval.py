@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Callable, Dict, Iterable
 
+from src.level_utils import parse_level
 from src.reward import math_reward
 
 
@@ -22,7 +23,7 @@ def evaluate_by_level(
     target_levels = set(int(l) for l in levels)
 
     for ex in dataset:
-        level = int(ex["level"])
+        level = parse_level(ex["level"])
         if level not in target_levels:
             continue
 
