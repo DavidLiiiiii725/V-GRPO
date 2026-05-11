@@ -13,7 +13,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grpo", required=True)
     parser.add_argument("--vgrpo", required=True)
     parser.add_argument("--output", default="results/tables/comparison.md")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    for name in ("grpo", "vgrpo"):
+        path = Path(getattr(args, name))
+        if not path.is_file():
+            parser.error(
+                f"--{name} file not found: {path}. "
+                f"Generate it first with scripts/eval_math.py --output {path}"
+            )
+    return args
 
 
 def main() -> None:

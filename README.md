@@ -31,6 +31,8 @@ pytest -q
 ### Build comparison table
 
 ```bash
+python scripts/eval_math.py --output results/tables/grpo.json
+python scripts/eval_math.py --output results/tables/vgrpo.json
 python scripts/compare_results.py --grpo results/tables/grpo.json --vgrpo results/tables/vgrpo.json
 ```
 
