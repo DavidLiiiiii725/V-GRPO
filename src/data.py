@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Dict, Iterable, List, Optional
 
 from datasets import Dataset, load_dataset
+from src.level_utils import parse_level
 
 
 def load_math_dataset(
@@ -36,7 +37,7 @@ def group_by_level(dataset: Dataset, levels: Iterable[int] = (1, 2, 3, 4, 5)) ->
         level_int = int(level)
 
         def _is_level(row: dict) -> bool:
-            return int(row["level"]) == level_int
+            return parse_level(row["level"]) == level_int
 
         grouped[level_int] = dataset.filter(_is_level)
     return grouped
@@ -54,7 +55,7 @@ def to_prompt_answer_pairs(dataset: Dataset) -> List[dict]:
             {
                 "prompt": prompt,
                 "answer": answer,
-                "level": int(row["level"]),
+                "level": parse_level(row["level"]),
                 "task_type": row.get("task_type", "math"),
             }
         )
