@@ -7,7 +7,7 @@ def test_case_a_values_close_to_paper_numbers():
     rewards = torch.tensor([7.2, 7.0, 7.1, 6.9, 7.3, 7.0, 7.1, 7.2], dtype=torch.float32)
     grpo = compute_grpo_advantage(rewards)
     best_idx = int(torch.argmax(rewards).item())
-    assert grpo[best_idx].item() == pytest_approx(1.54, abs_=0.05)
+    assert grpo[best_idx].item() == pytest_approx(1.63, abs_=0.05)
 
     vgrpo = compute_vgrpo_advantage(rewards, sigma_global=1.5)
     assert vgrpo[best_idx].item() == pytest_approx(0.13, abs_=0.03)

@@ -6,14 +6,30 @@ import re
 from fractions import Fraction
 
 
-_BOXED_PATTERN = re.compile(r"\\\\boxed\s*\{([^{}]+)\}")
 _FRACTION_PATTERN = re.compile(r"^[-+]?\\d+\\s*/\\s*[-+]?\\d+$")
 
 
 def _extract_final_answer(text: str) -> str:
-    boxed = _BOXED_PATTERN.findall(text)
-    if boxed:
-        return boxed[-1].strip()
+    marker = r"\boxed{"
+    idx = text.rfind(marker)
+    if idx != -1:
+        i = idx + len(marker)
+        depth = 1
+        chunk = []
+        while i < len(text) and depth > 0:
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+                chunk.append(ch)
+            elif ch == "}":
+                depth -= 1
+                if depth > 0:
+                    chunk.append(ch)
+            else:
+                chunk.append(ch)
+            i += 1
+        if depth == 0:
+            return "".join(chunk).strip()
 
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
     return lines[-1] if lines else ""
