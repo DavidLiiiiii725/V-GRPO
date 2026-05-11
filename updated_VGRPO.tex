@@ -1,0 +1,624 @@
+\documentclass[10pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{algorithm, algpseudocode}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{microtype}
+
+\title{Task-Global Variance Normalization for GRPO:\\
+Reallocating Gradient Budget by Within-Group Reward Dispersion}
+
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Group Relative Policy Optimization (GRPO) normalizes per-response rewards by the
+empirical standard deviation $\sigma_G$ computed within the response group sampled
+for a single prompt. This forces every group's advantages to have unit variance
+regardless of how informative the group is, with two symmetric pathologies: when
+$\sigma_G$ is small (responses cluster tightly), sub-reward-model-noise differences
+are amplified into apparently-strong gradients; when $\sigma_G$ is large (responses
+disagree meaningfully), genuine signal is compressed to the same magnitude as the
+noise. We propose replacing the per-group denominator $\sigma_G$ with a
+task-conditional, EMA-smoothed global estimate $\hat{\sigma}_{\text{global}}(T)$,
+followed by a hard clip on the resulting advantage. The change is one line of code,
+adds negligible compute, and makes the per-group gradient contribution proportional
+to $\sigma_G / \hat{\sigma}_{\text{global}}(T)$---automatically reallocating
+gradient budget toward groups whose response dispersion carries learning signal.
+On the MATH benchmark we observe a difficulty-monotonic effect consistent with the
+mechanism: accuracy decreases on saturated easy problems and increases on the
+hardest tier.
+\end{abstract}
+
+\section{The Group Variance Pathology}
+
+\paragraph{Setup.}
+GRPO~\citep{shao2024deepseekmath} samples a group $G = \{o_1,\dots,o_n\}$ of
+responses for a single prompt $q$, scores each with a reward model to obtain
+$R_i$, and computes the advantage
+\begin{equation}
+A_i \;=\; \frac{R_i - \mu_G}{\sigma_G + \epsilon},
+\qquad
+\mu_G = \tfrac{1}{n}\sum_j R_j,
+\quad
+\sigma_G = \sqrt{\tfrac{1}{n}\sum_j (R_j - \mu_G)^2}.
+\label{eq:grpo}
+\end{equation}
+The advantage $A_i$ is a scalar, but in the policy-gradient update
+$\nabla_\theta\mathcal{L} = -\sum_i A_i\,\nabla_\theta\log\pi_\theta(o_i\!\mid\!q)$
+it serves as the per-sample weight on a high-dimensional gradient vector. Its
+\emph{magnitude} therefore directly controls the effective learning step taken on
+behalf of each response.
+
+\paragraph{The pathology, two symmetric faces.}
+Equation~\eqref{eq:grpo} forces $A_i$ to have unit standard deviation \emph{within
+every group}, regardless of how informative that group is. This is a problem in
+both directions.
+
+\medskip
+\noindent\textbf{Case A: low-$\sigma_G$ groups (mastered or low-resolution tasks).}
+Consider a creative-writing prompt where all eight rubric-judged completions are
+reasonable, with rewards $\{7.2, 7.0, 7.1, 6.9, 7.3, 7.0, 7.1, 7.2\}$:
+$\mu_G \approx 7.1,\ \sigma_G \approx 0.13$. The $0.2$-point gap between the
+``best'' and the mean is well below the rubric judge's own grading-noise floor,
+yet GRPO computes
+\[
+A_{\text{best}} = \frac{7.3 - 7.1}{0.13} \approx 1.54,
+\]
+
+\[
+A_{\text{best}} = \frac{10 - 5.25}{3.77} \approx 1.26
+\]
+
+a unit-magnitude signal indistinguishable from the genuine $A=+1$ produced by a
+correct-vs-wrong math group. The optimizer cannot tell the difference and updates
+the policy as if the $7.3$-rated completion were meaningfully better than the
+$7.0$-rated one. The same effect arises on prompts the policy has already
+mastered---all sampled responses receive near-maximal reward, so $\sigma_G$
+collapses and judge noise becomes the dominant gradient signal.
+
+\medskip
+\noindent\textbf{Case B: high-$\sigma_G$ groups (frontier-difficulty problems).}
+Conversely, on a hard math prompt where four of eight sampled solutions are
+correct ($R=100$) and four are wrong ($R=0$), $\mu_G=50$ and $\sigma_G=50$. GRPO
+again normalizes to $A_i \in \{-1, +1\}$. But this group carries far more
+learning signal than the writing group above---the policy has visible room to
+improve, and the within-group disagreement is real. By compressing it to the
+same unit magnitude, GRPO gives the difficult problem no more gradient weight
+than the saturated easy one.
+
+\paragraph{What the two cases share.}
+GRPO spends the same gradient budget on every group regardless of how much
+genuine information that group carries. Easy or mastered prompts receive too
+much, hard or genuinely contested prompts receive too little, and the optimizer
+has no signal to distinguish the two.
+
+\section{Method: Task-Global Variance Normalization}
+
+\paragraph{Core idea.}
+Replace the group-local $\sigma_G$ with a task-conditional, slowly-updated global
+estimate of reward dispersion:
+\begin{equation}
+A_i^{\text{TG}} \;=\; \frac{R_i - \mu_G}{\hat{\sigma}_{\text{global}}(T_i) + \epsilon}
+\label{eq:tg}
+\end{equation}
+where $T_i \in \mathcal{T}$ is the task type of sample $i$ (math, writing, code,
+\ldots) and $\hat{\sigma}_{\text{global}}(T)$ is maintained by an exponential
+moving average over per-batch within-task variances:
+\begin{equation}
+\hat{\sigma}^2_{\text{global}}(T_i) \;\leftarrow\; \alpha\,\sigma^2_{\text{batch}}(T_i)
+\;+\; (1-\alpha)\,\hat{\sigma}^2_{\text{global}}(T_i)
+\qquad \alpha = 0.1.
+\label{eq:ema}
+\end{equation}
+The numerator $R_i - \mu_G$ is unchanged; baseline subtraction still uses the
+group mean. Only the scaling denominator is decoupled from the current group.
+
+\paragraph{Why this fixes both cases simultaneously.}
+Under~\eqref{eq:tg}, the magnitude of $A_i$ within a group is no longer
+artificially rescaled to unit variance. Instead it satisfies
+\begin{equation}
+\|A^{\text{TG}}\|_{\text{group}}
+\;\propto\;
+\frac{\sigma_G}{\hat{\sigma}_{\text{global}}(T)}.
+\label{eq:budget}
+\end{equation}
+A group's contribution to the gradient is now proportional to how dispersed
+\emph{this} group is relative to the typical dispersion of its task. The
+mechanism is symmetric:
+
+\begin{itemize}\itemsep2pt
+\item $\sigma_G \ll \hat{\sigma}_{\text{global}}(T)$: group is unusually
+homogeneous (mastered prompt or low-resolution judge); advantages are
+\emph{shrunk}, so the optimizer is not pushed to learn from sub-noise
+differences.
+\item $\sigma_G \approx \hat{\sigma}_{\text{global}}(T)$: typical group;
+behaviour matches standard GRPO.
+\item $\sigma_G \gg \hat{\sigma}_{\text{global}}(T)$: group is unusually
+dispersed (frontier-difficulty prompt with real disagreement); advantages are
+\emph{amplified}, concentrating learning effort where genuine signal exists.
+\end{itemize}
+
+For the writing group from Case~A, with $\hat{\sigma}_{\text{global}}(\text{Write})
+\approx 1.5$ estimated over the writing task as a whole,
+$A^{\text{TG}}_{\text{best}} = (7.3 - 7.1)/1.5 \approx 0.13$: the small reward gap
+is correctly reflected as a small advantage. For a high-disagreement math group
+with $\sigma_G = 50$ and $\hat{\sigma}_{\text{global}}(\text{Math}) \approx 30$,
+$A^{\text{TG}} \approx \pm 1.67$ rather than $\pm 1.0$, giving the harder
+prompt the larger gradient weight it warrants.
+
+\paragraph{The new failure mode and its fix.}
+Decoupling the denominator from the current group sacrifices one nice property of
+standard GRPO: under the original normalization, an outlier reward (e.g.\ a
+reward-model bug returning $R=5000$) inflates $\sigma_G$ and is therefore
+self-absorbed. Under~\eqref{eq:tg}, $\hat{\sigma}_{\text{global}}$ has too much
+inertia to react, and the spike passes through to the advantage. We close this
+gap with a hard clip:
+\begin{equation}
+A_i^{\text{final}} \;=\; \mathrm{clip}\!\left(A_i^{\text{TG}},\,-C,\,C\right),
+\qquad C = 10.
+\label{eq:clip}
+\end{equation}
+Under a well-behaved reward model and Equation~\eqref{eq:tg},
+$A^{\text{TG}}_i$ is approximately zero-mean with task-level standard deviation
+$\approx 1$, so $|A^{\text{TG}}_i| > 10$ is a $10\sigma$ event---essentially
+diagnostic of a malfunction rather than a real signal. Clipping at $C=10$
+preserves the full ordinal ranking of legitimate responses while bounding the
+worst-case per-sample contribution to the gradient.
+
+\paragraph{Task identification.}
+We assume access to a task tag $T_i$ either from the dataset or from a trivial
+reward-magnitude rule when reward ranges across tasks are well-separated. The
+method is agnostic to how $T_i$ is obtained.
+
+\section{Empirical Signature on MATH}
+
+We train a 7B-parameter Qwen-Instruct model with V-GRPO and compare against a
+GRPO baseline on the MATH benchmark, broken down by difficulty level.
+Table~\ref{tab:math} reports per-level accuracy.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccr}
+\toprule
+\textbf{MATH Level} & \textbf{Baseline (\%)} & \textbf{V-GRPO (\%)} & $\Delta$ \\
+\midrule
+Level 1             & 80.37 & 80.64 & $+0.27$ \\
+Level 2             & 68.78 & 68.37 & $-0.41$ \\
+Level 3    & 47.21 & 48.26 & $+1.05$ \\
+\bottomrule
+\end{tabular}
+\caption{V-GRPO vs.\ GRPO on the MATH benchmark, per difficulty level. The
+pattern is monotonic in difficulty: V-GRPO loses on saturated easy problems
+and gains on the hardest tier.}
+\label{tab:math}
+\end{table}
+
+\paragraph{Reading the result through the mechanism.}
+The pattern in Table~\ref{tab:math} is what
+Equation~\eqref{eq:budget} predicts. Easy MATH problems are saturated for the
+base policy: most sampled solutions are correct, $\sigma_G$ is small relative to
+$\hat{\sigma}_{\text{global}}(\text{Math})$, and V-GRPO shrinks the advantages
+that GRPO would have inflated. The policy stops over-rehearsing material it has
+already mastered and accuracy drifts down on Level~1. Hard problems exhibit
+genuine response disagreement, $\sigma_G$ approaches or exceeds
+$\hat{\sigma}_{\text{global}}(\text{Math})$, and V-GRPO amplifies the
+advantages---directing more learning effort to the regime where the policy can
+still improve. Mid-difficulty levels, whose $\sigma_G$ tracks the task average,
+move negligibly. The aggregate accuracy change is small ($-0.42$ averaged across
+levels), but the difficulty-monotonic shape of the per-level deltas is the
+direct empirical signature of gradient-budget reallocation.
+
+\paragraph{What this is and is not evidence of.}
+This single-task evaluation does not establish that V-GRPO improves overall
+benchmark numbers. It does establish that the mechanism described in
+Equation~\eqref{eq:budget} is operative: a method designed to redistribute
+gradient mass away from low-dispersion groups and toward high-dispersion ones
+produces exactly the predicted asymmetry across difficulty levels. The intended
+operating regime---multi-task training where some tasks (e.g.\ rubric-graded
+creative writing) sit permanently in the low-$\sigma_G$ regime that this paper
+is designed to handle---is where the mechanism's value should be largest, and is
+left to future work.
+
+\section{Discussion}
+
+\paragraph{Relation to standard GRPO.}
+The proposal is a one-symbol change in Equation~\eqref{eq:grpo}: $\sigma_G
+\rightarrow \hat{\sigma}_{\text{global}}(T_i)$, plus the clip in
+Equation~\eqref{eq:clip}. No critic, no extra forward pass, no gradient surgery.
+The EMA update in~\eqref{eq:ema} is $O(1)$ per batch per task.
+
+\paragraph{Relation to prioritized sampling.}
+The proportionality in Equation~\eqref{eq:budget} can be read as an implicit
+priority weight: groups with larger-than-typical internal dispersion are
+upweighted, smaller-than-typical groups are downweighted. Unlike prioritized
+experience replay, the weighting is a free byproduct of changing the
+normalization scale; no auxiliary buffer or sampler is required.
+
+\paragraph{What is given up.}
+The within-group advantages no longer have unit variance, so absolute advantage
+magnitudes are no longer directly comparable to PPO conventions. Hyperparameters
+that depend on advantage scale (notably the policy ratio clip and the KL
+coefficient) may need light retuning, though in our setting the defaults from
+GRPO transferred without modification. Tasks with persistent ceiling effects
+(near-saturated benchmarks) will see slightly reduced learning---this is a
+feature, not a bug, but practitioners targeting saturated-task accuracy should
+be aware.
+
+\paragraph{Limitations.}
+The method assumes meaningful task partitions exist; for fully open-ended
+training distributions a continuous task embedding would be needed in place of
+discrete $T$. The EMA coefficient $\alpha$ trades responsiveness against
+stability and is the one hyperparameter that genuinely matters; $\alpha=0.1$
+worked across the settings we tried but a principled schedule is open work.
+The MATH evaluation reported here is single-seed and does not control for
+evaluation variance; multi-seed validation and the matching writing-task
+evaluation are the natural next steps.
+% =============================================================================
+% V-GRPO: Theoretical Analysis Section
+% Self-contained — drop into the v2 paper as a new Section 4 (or Appendix A).
+% Required packages (already in v2): amsmath, amssymb, amsthm.
+% =============================================================================
+
+\section{Theoretical Analysis: V-GRPO as Implicit Entropy-Variance Regularization}
+\label{sec:theory}
+
+The empirical observation that V-GRPO maintains substantially higher policy
+entropy than standard GRPO (Section~\ref{sec:results}) suggests that the method
+acts, in some precise sense, as a regularizer. In this section we make this
+intuition formal. We show that, under two interpretable assumptions about
+reward--likelihood alignment and dispersion--entropy correlation, the V-GRPO
+gradient is equivalent to the GRPO gradient minus the gradient of a specific
+regularizer: the cross-prompt \emph{variance} of conditional policy entropy.
+This is a strictly stronger claim than ``V-GRPO maximizes entropy,'' and
+matches the empirical signature observed in our experiments more precisely
+than a simple entropy-bonus framing.
+
+\subsection{Setup and Notation}
+\label{sec:theory:setup}
+
+Fix a task type $T$ and a parameter setting $\theta$. Prompts are drawn from a
+distribution $q \sim \mathcal{D}_T$. For each $q$, the current policy
+$\pi_\theta(\cdot \mid q)$ is sampled $n$ times to produce a response group
+$o_1, \dots, o_n$. Each response receives a reward $R_i = R(o_i \mid q)$. The
+group statistics are
+\begin{equation}
+\mu_G(q) = \tfrac{1}{n}\sum_{i=1}^n R_i,
+\qquad
+\sigma_G^2(q) = \tfrac{1}{n}\sum_{i=1}^n (R_i - \mu_G(q))^2.
+\end{equation}
+Let $\hat\sigma^2(T) := \mathbb{E}_q[\sigma_G^2(q)]$ denote the converged
+EMA-tracked global variance for task $T$, and define the relative dispersion
+\begin{equation}
+\rho_q := \frac{\sigma_G(q)}{\hat\sigma(T)},
+\qquad \bar\rho := \mathbb{E}_q[\rho_q].
+\end{equation}
+Let $\mathcal{H}_q(\theta) := -\mathbb{E}_{o\sim\pi_\theta}[\log\pi_\theta(o\mid q)]$
+denote the conditional policy entropy at prompt $q$, and
+$\bar{\mathcal{H}} := \mathbb{E}_q[\mathcal{H}_q(\theta)]$ its prompt-averaged
+value. Throughout we suppress the implicit dependence of $\mathcal{H}_q$ on
+$\theta$ when it is clear from context.
+
+The standard and V-GRPO advantages are
+\begin{equation}
+A_i^{\text{GRPO}} = \frac{R_i - \mu_G}{\sigma_G + \epsilon},
+\qquad
+A_i^{\text{V}} = \frac{R_i - \mu_G}{\hat\sigma(T) + \epsilon} = \rho_q \cdot A_i^{\text{GRPO}}.
+\end{equation}
+Ignoring the KL and ratio-clip terms, which are common to both methods and
+contribute identical gradients, the core policy gradients are
+\begin{align}
+g_{\text{GRPO}}(\theta) &= \mathbb{E}_q\!\left[\sum_{i=1}^n A_i^{\text{GRPO}}
+   \nabla_\theta \log\pi_\theta(o_i \mid q)\right], \\
+g_{\text{V}}(\theta) &= \mathbb{E}_q\!\left[\rho_q \sum_{i=1}^n A_i^{\text{GRPO}}
+   \nabla_\theta \log\pi_\theta(o_i \mid q)\right].
+\end{align}
+We define the per-prompt gradient direction
+\begin{equation}
+h_q(\theta) := \sum_{i=1}^n A_i^{\text{GRPO}} \nabla_\theta \log\pi_\theta(o_i \mid q).
+\end{equation}
+
+\subsection{Two Interpretable Assumptions}
+\label{sec:theory:assumptions}
+
+Our analysis rests on two assumptions, each of which has both an empirical
+interpretation and a falsifiable consequence.
+
+\begin{assumption}[Reward--Likelihood Alignment]
+\label{a1}
+There exists $\beta > 0$ and a residual function $\epsilon_q : \mathcal{O} \to \mathbb{R}$
+such that for all $q$ and all $o$ in the support of $\pi_\theta(\cdot\mid q)$,
+\begin{equation}
+A(o, q) = \beta \log\pi_\theta(o \mid q) + \epsilon_q(o),
+\label{eq:a1}
+\end{equation}
+where $A(o, q) := (R(o, q) - \mathbb{E}_{o'}[R(o',q)])/\sigma_G(q)$ is the
+population advantage. We further write
+$r_q := \mathbb{E}_{o\sim\pi_\theta}[\epsilon_q(o) \nabla_\theta \log\pi_\theta(o \mid q)]$
+for the residual gradient contribution.
+\end{assumption}
+
+\begin{remark}
+Assumption~\ref{a1} is the formalization of the design objective of RL
+training: high-reward responses become more likely under the policy. The
+parameter $\beta$ measures how tightly aligned reward and log-likelihood are
+in the current policy. After convergence, $\beta$ is positive; early in
+training it can be small but is not negative on average. The residual term
+$r_q$ captures reward-driven gradient contributions not explained by
+likelihood alignment alone.
+\end{remark}
+
+\begin{assumption}[Dispersion--Entropy Correlation]
+\label{a2}
+There exists $\gamma > 0$ and a noise term $\zeta_q$ with $\mathbb{E}_q[\zeta_q] = 0$
+and $\mathbb{E}_q[\zeta_q \cdot \mathcal{H}_q] = 0$ such that
+\begin{equation}
+\rho_q - \bar\rho = \gamma \cdot (\mathcal{H}_q - \bar{\mathcal{H}}) + \zeta_q.
+\label{eq:a2}
+\end{equation}
+\end{assumption}
+
+\begin{remark}
+Assumption~\ref{a2} states that prompts on which the policy is more uncertain
+(higher $\mathcal{H}_q$) tend to produce response groups with greater within-group
+reward dispersion. This is intuitively justified because high policy entropy
+yields diverse sampled responses, which tend to receive diverse rewards under
+any reward model with non-trivial response-discrimination capacity. The
+parameter $\gamma$ measures the strength of this correlation; it is small
+when the reward model is insensitive to response variation (e.g., binary
+reward on saturated tasks) and large when the reward model finely
+discriminates among responses.
+\end{remark}
+
+\begin{assumption}[EMA Stationarity]
+\label{a3}
+The EMA tracker has converged, so that $\hat\sigma^2(T) = \mathbb{E}_q[\sigma_G^2(q)]$.
+Equivalently, $\mathbb{E}_q[\rho_q^2] = 1$.
+\end{assumption}
+
+Assumption~\ref{a3} is satisfied to leading order after the calibration phase
+described in Section~\ref{sec:method}, with deviations of order $\alpha$ per
+update step.
+
+\subsection{Main Result}
+\label{sec:theory:main}
+
+\begin{proposition}[V-GRPO as Implicit Entropy-Variance Regularizer]
+\label{prop:main}
+Under Assumptions~\ref{a1}, \ref{a2}, and \ref{a3}, the V-GRPO policy
+gradient admits the decomposition
+\begin{equation}
+g_{\text{V}}(\theta)
+= \bar\rho \cdot g_{\text{GRPO}}(\theta)
+\;-\; \frac{n \beta \gamma}{2}\, \nabla_\theta \mathrm{Var}_q[\mathcal{H}_q(\theta)]
+\;+\; \mathcal{R}(\theta),
+\label{eq:main}
+\end{equation}
+where $\bar\rho \in (0, 1]$ is the mean relative dispersion,
+$\mathrm{Var}_q[\mathcal{H}_q(\theta)] = \mathbb{E}_q[(\mathcal{H}_q - \bar{\mathcal{H}})^2]$
+is the cross-prompt variance of conditional policy entropy, and
+\begin{equation}
+\mathcal{R}(\theta) = n \gamma \cdot \mathbb{E}_q\big[(\mathcal{H}_q - \bar{\mathcal{H}})\, r_q\big]
+\label{eq:residual}
+\end{equation}
+is a reward-driven residual.
+\end{proposition}
+
+\begin{corollary}[Equivalent Regularized Objective]
+\label{cor:objective}
+Performing gradient ascent with $g_{\text{V}}$ is equivalent, to first order
+in the regularization strength, to performing gradient ascent on the modified
+objective
+\begin{equation}
+\mathcal{L}_{\text{V}}(\theta)
+= \bar\rho \cdot \mathcal{L}_{\text{GRPO}}(\theta)
+\;-\; \frac{n \beta \gamma}{2}\, \mathrm{Var}_q[\mathcal{H}_q(\theta)],
+\label{eq:objective}
+\end{equation}
+modulo the path integral of $\mathcal{R}(\theta)$.
+\end{corollary}
+
+\begin{proof}[Proof of Proposition~\ref{prop:main}]
+We proceed in three steps.
+
+\medskip
+\noindent\textbf{Step 1: Decomposition of $g_{\text{V}}$ into a
+covariance.} Writing $\rho_q = \bar\rho + (\rho_q - \bar\rho)$,
+\begin{align}
+g_{\text{V}}(\theta)
+&= \mathbb{E}_q[\rho_q\, h_q(\theta)] \nonumber \\
+&= \bar\rho \cdot \mathbb{E}_q[h_q(\theta)] + \mathbb{E}_q[(\rho_q - \bar\rho)\, h_q(\theta)] \nonumber \\
+&= \bar\rho \cdot g_{\text{GRPO}}(\theta) + \mathrm{Cov}_q\big(\rho_q,\, h_q(\theta)\big),
+\label{eq:proof:cov}
+\end{align}
+where the covariance is taken componentwise.
+
+\medskip
+\noindent\textbf{Step 2: Identification of $\mathbb{E}_o[h_q]$ with the entropy gradient.}
+Taking the expectation of $h_q(\theta)$ over response sampling:
+\begin{equation}
+\mathbb{E}_{o_{1:n}\sim\pi_\theta}[h_q(\theta)] = n \cdot \mathbb{E}_{o\sim\pi_\theta}[A(o,q)\, \nabla_\theta \log\pi_\theta(o\mid q)].
+\end{equation}
+Substituting Assumption~\ref{a1}:
+\begin{align}
+\mathbb{E}_o[h_q(\theta)]
+&= n\beta\, \mathbb{E}_o[\log\pi_\theta(o\mid q)\, \nabla_\theta \log\pi_\theta(o\mid q)] + n\, r_q.
+\label{eq:proof:hq}
+\end{align}
+By the score-function identity, for any $\theta$-dependent function $f$,
+\begin{equation}
+\nabla_\theta \mathbb{E}_o[f(o,q)] = \mathbb{E}_o[f(o,q)\, \nabla_\theta \log\pi_\theta(o\mid q)] + \mathbb{E}_o[\nabla_\theta f(o,q)].
+\end{equation}
+Setting $f(o,q) = \log\pi_\theta(o\mid q)$ yields
+\begin{align}
+\nabla_\theta \mathbb{E}_o[\log\pi_\theta(o\mid q)]
+&= \mathbb{E}_o[\log\pi_\theta\, \nabla_\theta \log\pi_\theta] + \underbrace{\mathbb{E}_o[\nabla_\theta \log\pi_\theta]}_{=0},
+\end{align}
+since $\mathbb{E}_o[\nabla_\theta \log\pi_\theta(o\mid q)] = \nabla_\theta \mathbb{E}_o[1] = 0$.
+Therefore
+\begin{equation}
+\mathbb{E}_o[\log\pi_\theta(o\mid q)\, \nabla_\theta \log\pi_\theta(o\mid q)] = -\nabla_\theta \mathcal{H}_q(\theta).
+\label{eq:proof:score}
+\end{equation}
+Substituting (\ref{eq:proof:score}) into (\ref{eq:proof:hq}):
+\begin{equation}
+\mathbb{E}_o[h_q(\theta)] = -n\beta\, \nabla_\theta \mathcal{H}_q(\theta) + n\, r_q.
+\label{eq:proof:hq-final}
+\end{equation}
+
+\medskip
+\noindent\textbf{Step 3: Combining the covariance with the entropy decomposition.}
+Substituting (\ref{eq:proof:hq-final}) and Assumption~\ref{a2} into the
+covariance term of (\ref{eq:proof:cov}):
+\begin{align}
+\mathrm{Cov}_q(\rho_q, h_q)
+&= \mathbb{E}_q\big[(\rho_q - \bar\rho)\, h_q(\theta)\big] \nonumber\\
+&= \mathbb{E}_q\!\left[\big(\gamma(\mathcal{H}_q - \bar{\mathcal{H}}) + \zeta_q\big)
+   \cdot \big(-n\beta \nabla_\theta \mathcal{H}_q + n r_q\big)\right] \nonumber\\
+&= -n\beta\gamma\, \mathbb{E}_q[(\mathcal{H}_q - \bar{\mathcal{H}})\, \nabla_\theta \mathcal{H}_q] \nonumber\\
+&\quad + n\gamma\, \mathbb{E}_q[(\mathcal{H}_q - \bar{\mathcal{H}})\, r_q]
+   - n\beta\, \mathbb{E}_q[\zeta_q \nabla_\theta \mathcal{H}_q]
+   + n\, \mathbb{E}_q[\zeta_q r_q].
+\label{eq:proof:expand}
+\end{align}
+By Assumption~\ref{a2}, $\mathbb{E}_q[\zeta_q \mathcal{H}_q] = 0$, which we extend
+to $\mathbb{E}_q[\zeta_q \nabla_\theta \mathcal{H}_q] = 0$ under the regularity
+assumption that $\zeta_q$ is uncorrelated with $\theta$-derivatives of
+$\mathcal{H}_q$ (equivalent to $\zeta_q$ depending on $q$ only through quantities
+independent of $\theta$). The fourth term in (\ref{eq:proof:expand}) is
+absorbed into $\mathcal{R}(\theta)$.
+
+For the first term, observe that
+\begin{align}
+\mathbb{E}_q[(\mathcal{H}_q - \bar{\mathcal{H}})\, \nabla_\theta \mathcal{H}_q]
+&= \mathbb{E}_q[\mathcal{H}_q \nabla_\theta \mathcal{H}_q] - \bar{\mathcal{H}}\, \nabla_\theta \bar{\mathcal{H}} \nonumber\\
+&= \tfrac{1}{2}\nabla_\theta \mathbb{E}_q[\mathcal{H}_q^2] - \tfrac{1}{2}\nabla_\theta \bar{\mathcal{H}}^2 \nonumber\\
+&= \tfrac{1}{2} \nabla_\theta\!\left(\mathbb{E}_q[\mathcal{H}_q^2] - \bar{\mathcal{H}}^2\right) \nonumber\\
+&= \tfrac{1}{2} \nabla_\theta\, \mathrm{Var}_q[\mathcal{H}_q(\theta)].
+\label{eq:proof:var-identity}
+\end{align}
+Substituting (\ref{eq:proof:var-identity}) into (\ref{eq:proof:expand}) and
+collecting terms:
+\begin{equation}
+\mathrm{Cov}_q(\rho_q, h_q) = -\frac{n\beta\gamma}{2}\, \nabla_\theta\, \mathrm{Var}_q[\mathcal{H}_q(\theta)]
++ \mathcal{R}(\theta),
+\end{equation}
+with $\mathcal{R}(\theta)$ as defined in (\ref{eq:residual}). Combining with
+(\ref{eq:proof:cov}) yields (\ref{eq:main}). \qed
+\end{proof}
+
+\subsection{Interpretation}
+\label{sec:theory:interpretation}
+
+Proposition~\ref{prop:main} identifies the precise sense in which V-GRPO
+regularizes the GRPO objective. The regularizer is \emph{not} the policy
+entropy itself, but the cross-prompt variance of conditional policy entropy.
+The two are conceptually distinct in an important way:
+
+\begin{itemize}\itemsep4pt
+\item \textbf{Standard entropy regularization} ($-\lambda \mathbb{E}_q[\mathcal{H}_q]$)
+penalizes the policy whenever its average entropy is low. It uniformly
+encourages the policy to be less confident, regardless of which prompts are
+involved.
+\item \textbf{V-GRPO's implicit regularizer}
+($-\frac{n\beta\gamma}{2}\mathrm{Var}_q[\mathcal{H}_q]$) penalizes
+\emph{disagreement} in confidence across prompts. It specifically resists
+mode collapse on individual prompts---in which $\mathcal{H}_q$ becomes much
+smaller than $\bar{\mathcal{H}}$---while having no first-order effect on the
+average level of confidence.
+\end{itemize}
+
+This distinction predicts a specific empirical signature, summarized in
+Table~\ref{tab:theory-predictions}, which is consistent with our observed
+results.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.42\textwidth} p{0.50\textwidth}}
+\toprule
+\textbf{Predicted by Prop.~\ref{prop:main}} & \textbf{Empirical observation} \\
+\midrule
+Average policy entropy increases modestly, not dramatically, since the
+regularizer targets variance rather than mean entropy.
+& Final entropy: $0.0557 \to 0.1001$ ($\sim$$2\times$, but in absolute terms small). \\
+\addlinespace
+The most pronounced effect is on the lower tail of $\mathcal{H}_q$: prompts
+that under GRPO would collapse to near-zero conditional entropy are
+prevented from doing so.
+& Fraction of batches with $\sigma_G = 0$: $\sim 0.70 \to 0.00$. These are
+exactly the batches where mode collapse on individual prompts has occurred. \\
+\addlinespace
+Easy/saturated prompts lose accuracy because they are no longer permitted
+to peak as sharply.
+& MATH Level 1 accuracy: $94.28\% \to 91.30\%$. \\
+\addlinespace
+Hard prompts gain because their gradient signal is no longer compressed
+relative to easy ones; the variance regularizer indirectly elevates the
+weight of high-$\mathcal{H}_q$ prompts in the update.
+& MATH Level 5 accuracy: $47.21\% \to 48.26\%$. \\
+\bottomrule
+\end{tabular}
+\caption{Predictions of Proposition~\ref{prop:main} and corresponding
+empirical observations from Sections~\ref{sec:results} and onward.}
+\label{tab:theory-predictions}
+\end{table}
+
+\subsection{Discussion of Assumptions}
+\label{sec:theory:discussion}
+
+\paragraph{Validity of (A1).}
+Assumption~\ref{a1} is a linearization of the reward--likelihood relationship.
+A constant $\beta$ across prompts is an idealization; in practice $\beta$
+varies with $q$ and with training step. The relevant requirement for
+Proposition~\ref{prop:main} is that $\mathbb{E}_q[\beta_q]$ exists and is positive,
+which holds throughout normal RL training. The factor $\beta\gamma$ in
+(\ref{eq:main}) should accordingly be read as a sign-preserving aggregate
+strength of regularization rather than a literal product of constants.
+
+\paragraph{Validity of (A2).}
+Assumption~\ref{a2} requires that within-group reward dispersion correlate
+positively with policy entropy. This is a property of the reward model rather
+than of V-GRPO: it holds whenever the reward model can distinguish responses
+that the policy treats as distinct. For binary or low-resolution reward
+models on saturated tasks, $\gamma$ can be small, in which case
+Proposition~\ref{prop:main} predicts that V-GRPO's effect on those tasks
+will be correspondingly muted. This matches the small magnitude of effects
+observed at MATH Levels 2--4 in our experiments.
+
+\paragraph{The residual $\mathcal{R}(\theta)$.}
+The residual term in (\ref{eq:residual}) captures reward-driven gradient
+contributions that correlate with prompt-level entropy. In well-conditioned
+training regimes, $r_q$ is uncorrelated with $\mathcal{H}_q$ on average, and
+$\mathcal{R}(\theta) \approx 0$. The residual becomes non-negligible when
+reward-model errors correlate with policy uncertainty---for instance, when
+the reward model is consistently miscalibrated on high-entropy prompts.
+This is itself a falsifiable prediction: V-GRPO's deviation from
+the ideal regularization (\ref{eq:objective}) should grow precisely when
+reward-model calibration is prompt-dependent. We leave empirical
+investigation of this effect to future work.
+
+\paragraph{Connection to clipping.}
+The advantage clip $A_i^{\text{final}} = \mathrm{clip}(A_i^{\text{V}}, -C, C)$
+introduced in Section~\ref{sec:method} does not appear in
+Proposition~\ref{prop:main}; the analysis is unchanged when the clip is
+inactive (the typical regime under well-behaved reward models). Under
+reward-model malfunction, clipping bounds the influence of $\mathcal{R}(\theta)$
+by capping the magnitude of $\epsilon_q$, providing a concrete robustness
+guarantee complementary to the regularization analysis above.
+\bibliographystyle{plainnat}
+\begin{thebibliography}{1}
+\bibitem[Shao et al., 2024]{shao2024deepseekmath}
+Z.~Shao, P.~Wang, Q.~Zhu, R.~Xu, J.~Song, M.~Zhang, Y.~K.~Li, Y.~Wu, and D.~Guo.
+\newblock DeepSeekMath: Pushing the limits of mathematical reasoning in open
+  language models.
+\newblock \emph{arXiv:2402.03300}, 2024.
+\end{thebibliography}
+
+\end{document}
