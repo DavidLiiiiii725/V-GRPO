@@ -6,7 +6,7 @@ import re
 from fractions import Fraction
 
 
-_FRACTION_PATTERN = re.compile(r"^[-+]?\\d+\\s*/\\s*[-+]?\\d+$")
+_FRACTION_PATTERN = re.compile(r"^[-+]?\d+\s*/\s*[-+]?\d+$")
 
 
 def _extract_final_answer(text: str) -> str:
@@ -52,7 +52,7 @@ def _normalize_answer(answer: str) -> str:
         try:
             frac = Fraction(a)
             return f"{frac.numerator}/{frac.denominator}"
-        except ZeroDivisionError:
+        except (ValueError, ZeroDivisionError):
             return a
 
     return a.lower()

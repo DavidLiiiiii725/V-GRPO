@@ -14,6 +14,6 @@ def test_symbolic_text_not_equal_when_mismatch():
 
 
 def test_plain_text_last_line_extraction():
-    response = "分析过程...\\nThe final answer is 7"
+    response = "分析过程...\n7"
     gt = "7"
-    assert math_reward(response, gt) == 0.0
+    assert math_reward(response, gt) == 1.0

@@ -79,7 +79,11 @@ class VGRPOTrainerCore:
 
     def process_step(self, rewards: Tensor, task_types: Sequence[str], entropies: Tensor) -> TrainerOutput:
         advantages = self.compute_advantages(rewards, task_types)
-        sigma_global = self.variance_tracker.get(task_types[0]) if task_types else 1.0
+        if task_types:
+            sigmas = [self.variance_tracker.get(task) for task in task_types]
+            sigma_global = float(sum(sigmas) / len(sigmas))
+        else:
+            sigma_global = 1.0
         metrics = compute_step_metrics(
             rewards=rewards,
             advantages=advantages,
