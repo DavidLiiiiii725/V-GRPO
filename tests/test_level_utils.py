@@ -13,3 +13,9 @@ def test_parse_level_accepts_numeric_and_string_values():
 def test_parse_level_rejects_invalid_values():
     with pytest.raises(ValueError):
         parse_level("unknown")
+    with pytest.raises(ValueError):
+        parse_level("abc123xyz")
+    with pytest.raises(ValueError):
+        parse_level("Level -3")
+    with pytest.raises(ValueError):
+        parse_level(0)
