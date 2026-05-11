@@ -21,8 +21,11 @@ class GlobalVarianceTracker:
         rewards = list(float(x) for x in batch_rewards)
         if not rewards:
             return
-        mean_r = sum(rewards) / len(rewards)
-        batch_var = sum((r - mean_r) ** 2 for r in rewards) / len(rewards)
+        count = len(rewards)
+        sum_r = sum(rewards)
+        sum_sq = sum(r * r for r in rewards)
+        mean_r = sum_r / count
+        batch_var = max((sum_sq / count) - (mean_r * mean_r), 0.0)
 
         if task_type not in self._ema_var:
             self._ema_var[task_type] = batch_var

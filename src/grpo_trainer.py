@@ -83,6 +83,8 @@ class VGRPOTrainerCore:
             # Report task-global sigma as an unweighted average across task types.
             # This keeps the metric comparable across mixed-task batches without
             # over-emphasizing whichever task appears most frequently in one step.
+            # Trade-off: if tasks have very different scales, this summary metric
+            # can hide per-task variance differences; inspect per-task logs as needed.
             unique_tasks = sorted(set(task_types))
             sigmas = [self.variance_tracker.get(task) for task in unique_tasks]
             sigma_global = float(sum(sigmas) / len(sigmas))

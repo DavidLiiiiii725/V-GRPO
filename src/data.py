@@ -45,10 +45,15 @@ def group_by_level(dataset: Dataset, levels: Iterable[int] = (1, 2, 3, 4, 5)) ->
 def to_prompt_answer_pairs(dataset: Dataset) -> List[dict]:
     pairs = []
     for row in dataset:
+        prompt = row.get("problem") or row.get("question")
+        answer = row.get("solution") or row.get("answer")
+        if not prompt or not answer:
+            raise ValueError("Dataset row missing required prompt/answer fields")
+
         pairs.append(
             {
-                "prompt": row.get("problem") or row.get("question") or "",
-                "answer": row.get("solution") or row.get("answer") or "",
+                "prompt": prompt,
+                "answer": answer,
                 "level": int(row["level"]),
                 "task_type": row.get("task_type", "math"),
             }
