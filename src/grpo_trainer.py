@@ -80,6 +80,9 @@ class VGRPOTrainerCore:
     def process_step(self, rewards: Tensor, task_types: Sequence[str], entropies: Tensor) -> TrainerOutput:
         advantages = self.compute_advantages(rewards, task_types)
         if task_types:
+            # Report task-global sigma as an unweighted average across task types.
+            # This keeps the metric comparable across mixed-task batches without
+            # over-emphasizing whichever task appears most frequently in one step.
             unique_tasks = sorted(set(task_types))
             sigmas = [self.variance_tracker.get(task) for task in unique_tasks]
             sigma_global = float(sum(sigmas) / len(sigmas))
