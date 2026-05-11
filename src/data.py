@@ -33,7 +33,12 @@ def load_math_dataset(
 def group_by_level(dataset: Dataset, levels: Iterable[int] = (1, 2, 3, 4, 5)) -> Dict[int, Dataset]:
     grouped: Dict[int, Dataset] = {}
     for level in levels:
-        grouped[level] = dataset.filter(lambda row, lv=level: int(row["level"]) == lv)
+        level_int = int(level)
+
+        def _is_level(row: dict) -> bool:
+            return int(row["level"]) == level_int
+
+        grouped[level_int] = dataset.filter(_is_level)
     return grouped
 
 
